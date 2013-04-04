@@ -1,41 +1,53 @@
 extern mod std;
 extern mod zmq;
 
-fn new_server(ctx: zmq::Context, ch: oldcomm::Chan<()>) {
-    let socket = result::unwrap(ctx.socket(zmq::REP));
+fn new_server(ctx: zmq::Context) {
+    io::println("starting server");
+
+    let socket = ctx.socket(zmq::REP).unwrap();
     socket.bind("tcp://127.0.0.1:3456").get();
 
-    let msg = result::unwrap(socket.recv_str(0));
-    io::println(fmt!("received %s", msg));
+    let msg = socket.recv_str(0).unwrap();
+    io::println(fmt!("server received %?", msg));
 
-    match socket.send_str(fmt!("hello %s", msg), 0) {
+    let s = fmt!("hello %s", msg);
+    io::println(fmt!("server sending %?", s));
+    match socket.send_str(s, 0) {
         Ok(()) => { }
-        Err(e) => fail e.to_str()
+        Err(e) => fail!(e.to_str())
     }
 
     // Let the main thread know we're done.
-    ch.send(());
+    let finished_socket = ctx.socket(zmq::PAIR).unwrap();
+    finished_socket.connect("inproc://finished");
+    finished_socket.send_str("done", 0);
 }
 
 fn new_client(ctx: zmq::Context) {
     io::println("starting client");
 
-    let socket = result::unwrap(ctx.socket(zmq::REQ));
+    let socket = ctx.socket(zmq::REQ).unwrap();
 
-    socket.set_hwm(10u64).get();
-    io::println(fmt!("hwm: %?", socket.get_hwm().get()));
+    io::println(fmt!("hwm: %?", socket.get_sndhwm().get()));
+    socket.set_sndhwm(10).get();
+    io::println("here!");
+    io::stdout().flush();
+    io::println(fmt!("hwm: %?", socket.get_sndhwm().get()));
 
     socket.set_identity(str::to_bytes("identity")).get();
 
-    let identity = result::unwrap(socket.get_identity());
-    io::println(fmt!("identity: %s", str::from_bytes(identity)));
+    let identity = socket.get_identity().unwrap();
+    io::println(fmt!("client identity: %s", str::from_bytes(identity)));
 
     io::println("client connecting to server");
-
     socket.connect("tcp://127.0.0.1:3456").get();
-    socket.send_str("foo", 0).get();
 
-    io::println(result::unwrap(socket.recv_str(0)));
+    let s = "foo";
+    io::println(fmt!("client sending %?", s));
+    socket.send_str(s, 0).get();
+
+    io::println(fmt!("client received %?", socket.recv_str(0).unwrap()));
+    socket.close();
 }
 
 fn main() {
@@ -43,17 +55,22 @@ fn main() {
 
     io::println(fmt!("version: %d %d %d", major, minor, patch));
 
-    let ctx = result::unwrap(zmq::init(1));
+    let ctx = zmq::init(1).unwrap();
+
+    let finished_socket = ctx.socket(zmq::PAIR).unwrap();
+    finished_socket.bind("inproc://finished");
 
     // We need to start the server in a separate scheduler as it blocks.
-    let po = oldcomm::Port();
-    let ch = oldcomm::Chan(&po);
-    do task::spawn_sched(task::SingleThreaded) { new_server(ctx, ch) }
+    do task::spawn_sched(task::SingleThreaded) {
+        new_server(ctx)
+    }
 
     new_client(ctx);
 
     // Wait for the server to shut down.
-    po.recv();
+    let s = finished_socket.recv_str(0);
+    io::println(fmt!("%?", s));
+    finished_socket.close();
 
     ctx.term().get();
 }
